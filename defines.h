@@ -41,7 +41,11 @@ typedef struct _IMAGE_FILE_HEADER {
 	WORD    Characteristics;
 } IMAGE_FILE_HEADER, * PIMAGE_FILE_HEADER;
 
+typedef struct _SECTION_IMAGE_INFORMATION {
+	PVOID     EntryPoint;
+	ULONG     unknown[14];
 
+} SECTION_IMAGE_INFORMATION, * PSECTION_IMAGE_INFORMATION;
 
 typedef struct _IMAGE_OPTIONAL_HEADER {
 	WORD        Magic;
@@ -128,6 +132,12 @@ typedef struct _IMAGE_EXPORT_DIRECTORY {
 	DWORD   AddressOfNames;         // RVA from base of image
 	DWORD   AddressOfNameOrdinals;  // RVA from base of image
 } IMAGE_EXPORT_DIRECTORY, * PIMAGE_EXPORT_DIRECTORY;
+
+typedef struct _FULL_IMAGE_NT_HEADERS {
+	DWORD Signature;
+	IMAGE_FILE_HEADER FileHeader;
+	IMAGE_OPTIONAL_HEADER OptionalHeader;
+} FULL_IMAGE_NT_HEADERS, * PFULL_IMAGE_NT_HEADERS;
 
 // undocumented
 // most undocumented structs are taken from  https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntexapi/system_information_class.htm
@@ -297,13 +307,7 @@ enum SYSTEM_INFORMATION_CLASS {
 	SystemDmaGuardPolicyInformation = 0xCA,
 };
 
-typedef NTSTATUS(NTAPI* PZwQuerySystemInformation)
-(
-	SYSTEM_INFORMATION_CLASS SystemInformationClass,
-	PVOID                    SystemInformation,
-	ULONG                    SystemInformationLength,
-	PULONG                   ReturnLength
-);
+typedef NTSTATUS(NTAPI* PZwQuerySystemInformation) (SYSTEM_INFORMATION_CLASS SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
 
 typedef struct _RTL_PROCESS_MODULE_INFORMATION
 {
@@ -325,3 +329,66 @@ typedef struct _RTL_PROCESS_MODULES
 	RTL_PROCESS_MODULE_INFORMATION Modules[1];
 } RTL_PROCESS_MODULES, * PRTL_PROCESS_MODULES;
 
+typedef NTSTATUS(* PZwQuerySection)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+typedef struct _SYSTEM_THREAD_INFORMATION
+{
+	LARGE_INTEGER KernelTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER CreateTime;
+	ULONG WaitTime;
+	PVOID StartAddress;
+	CLIENT_ID ClientId;
+	KPRIORITY Priority;
+	LONG BasePriority;
+	ULONG ContextSwitches;
+	ULONG ThreadState;
+	KWAIT_REASON WaitReason;
+}SYSTEM_THREAD_INFORMATION, * PSYSTEM_THREAD_INFORMATION;
+
+typedef struct _SYSTEM_PROCESS_INFO
+{
+	ULONG NextEntryOffset;
+	ULONG NumberOfThreads;
+	LARGE_INTEGER WorkingSetPrivateSize;
+	ULONG HardFaultCount;
+	ULONG NumberOfThreadsHighWatermark;
+	ULONGLONG CycleTime;
+	LARGE_INTEGER CreateTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER KernelTime;
+	UNICODE_STRING ImageName;
+	KPRIORITY BasePriority;
+	HANDLE UniqueProcessId;
+	HANDLE InheritedFromUniqueProcessId;
+	ULONG HandleCount;
+	ULONG SessionId;
+	ULONG_PTR UniqueProcessKey;
+	SIZE_T PeakVirtualSize;
+	SIZE_T VirtualSize;
+	ULONG PageFaultCount;
+	SIZE_T PeakWorkingSetSize;
+	SIZE_T WorkingSetSize;
+	SIZE_T QuotaPeakPagedPoolUsage;
+	SIZE_T QuotaPagedPoolUsage;
+	SIZE_T QuotaPeakNonPagedPoolUsage;
+	SIZE_T QuotaNonPagedPoolUsage;
+	SIZE_T PagefileUsage;
+	SIZE_T PeakPagefileUsage;
+	SIZE_T PrivatePageCount;
+	LARGE_INTEGER ReadOperationCount;
+	LARGE_INTEGER WriteOperationCount;
+	LARGE_INTEGER OtherOperationCount;
+	LARGE_INTEGER ReadTransferCount;
+	LARGE_INTEGER WriteTransferCount;
+	LARGE_INTEGER OtherTransferCount;
+	SYSTEM_THREAD_INFORMATION Threads[1];
+}SYSTEM_PROCESS_INFO, * PSYSTEM_PROCESS_INFO;
+
+typedef struct _SYSTEM_SERVICE_DESCRIPTOR_TABLE
+{
+	PULONG_PTR ServiceTableBase;
+	PULONG ServiceCounterTableBase;
+	ULONG_PTR NumberOfServices;
+	PUCHAR ParamTableBase;
+} SYSTEM_SERVICE_DESCRIPTOR_TABLE, * PSYSTEM_SERVICE_DESCRIPTOR_TABLE;

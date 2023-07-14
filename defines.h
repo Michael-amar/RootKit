@@ -21,10 +21,12 @@
 #define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT   13   // Delay Load Import Descriptors
 #define IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR 14   // COM Runtime descriptor
 
-typedef unsigned short      WORD;
+typedef unsigned long		DWORD;
 typedef DWORD*				PDWORD;
-typedef unsigned char       BYTE;
+typedef unsigned short      WORD;
 typedef WORD*				PWORD;
+typedef unsigned char       BYTE;
+
 
 typedef struct _IMAGE_DATA_DIRECTORY {
 	DWORD   VirtualAddress;

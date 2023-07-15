@@ -1,10 +1,9 @@
 #pragma once
 
-#include <intrin.h>
+#include <intrin.h> //__writemcr, __readmcr...
 #include <ntifs.h>
-#include <ntdef.h> // For WCHAR
 
 #include <defines.h>
 #include <ssdt.h>
-
+#include <dkom.h>
 

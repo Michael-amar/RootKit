@@ -41,7 +41,8 @@ NTSTATUS CreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 void SugiotUnload(_In_ PDRIVER_OBJECT DriverObject)
 {
-	UnHookSSDT(HookFuncName);
+	//UnHookSSDT(HookFuncName);
+	unhide();
 	UNICODE_STRING sym_link = RTL_CONSTANT_STRING(L"\\??\\Sugiot2");
 	IoDeleteSymbolicLink(&sym_link);
 
@@ -75,10 +76,12 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 		DbgPrint("Failed to create symbolic link");
 		return status;
 	}
-
-	DbgPrint("Driver Load\n");
-	HookSSDT(HookFuncName);
 	
+	//printProcessList();
+	DbgPrint("Driver Load\n");
+	//HookSSDT(HookFuncName);
+	hide();
+	printProcessList();
 	return STATUS_SUCCESS;  
 
 } 

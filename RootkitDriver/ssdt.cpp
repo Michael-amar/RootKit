@@ -50,7 +50,6 @@ void EnableWP(KIRQL irql)
 	KeLowerIrql(irql);
 }
 
-//https://stackoverflow.com/questions/47876087/zwquerysysteminformation-is-not-working-properly
 PVOID GetNtoskrnlBase()
 {
 	PVOID NtoskrnlBase = NULL;
@@ -188,15 +187,31 @@ PLONG GetSsdtAddress(PVOID ntoskrnlBase)
 
 NTSTATUS UnHookSSDT(const char* functionName)
 {
+	// function is not hooked
+	if (oldZwCreateFile == NULL)
+		return STATUS_UNSUCCESSFUL;
+
 	PVOID ntoskrnlBase = GetNtoskrnlBase();
+	if (ntoskrnlBase == NULL)
+		return STATUS_UNSUCCESSFUL;
+
 	PLONG ssdt = GetSsdtAddress(ntoskrnlBase);
+	if (ssdt == NULL)
+		return STATUS_UNSUCCESSFUL;
+
 	DWORD syscall = GetSystemCallNumber(functionName);
+	if (syscall == -1)
+		return STATUS_UNSUCCESSFUL;
+
 	LONG functionNumOfParams = ssdt[syscall] & 0xF;
 	ULONG oldZwCreateFileRVA = (((PUCHAR)oldZwCreateFile - (PUCHAR)ssdt) << 4);
 	LONG oldZwCreateFileSsdtEntry = oldZwCreateFileRVA | functionNumOfParams;
+	
 	KIRQL irql = DisableWP();
 	InterlockedExchange(&ssdt[syscall], oldZwCreateFileSsdtEntry);
 	EnableWP(irql);
+
+	oldZwCreateFile = NULL;
 	return STATUS_SUCCESS;
 }
 
@@ -273,6 +288,10 @@ NTSTATUS CopyToMemory(UNALIGNED PVOID destination, UNALIGNED PVOID source, ULONG
 
 NTSTATUS HookSSDT(const char* functionName)
 {
+	// function is already hooked
+	if (oldZwCreateFile != NULL)
+		return STATUS_UNSUCCESSFUL;
+
 	NTSTATUS status = STATUS_SUCCESS;
 	UCHAR shellCode[] = "\x48\xB8********\x50\xC3"; //movabs rax, xxxx ; push rax; ret
 	*(PULONGLONG)(shellCode + 2) = (ULONGLONG)ZwCreateFileHook;

